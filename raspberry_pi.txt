@@ -1,0 +1,176 @@
+import paho.mqtt.client as mqtt
+import time
+import aioblescan as aiobs
+from aioblescan.plugins import EddyStone
+import asyncio
+from urllib.parse import urlparse
+from datetime import datetime
+import csv
+import pandas as pd
+from datetime import datetime
+import os.path
+import serial
+
+broker_address = "192.168.4.17" #enter your broker address here
+subscribetopic = "testTopic1"
+publishtopic = "testTopic2"
+
+
+def on_connect(client, userdata, flags, rc):
+    print("Connected with result".format(str(rc)))
+    client.subscribe(subscribetopic)
+   
+def on_message (client,userdata,msg):
+    print("Message received" + msg.topic+" "+str(msg.payload))
+    weather_data = msg.payload.decode()
+    if weather_data:
+        #today's data
+        #Sample WeatherData:  2021-11-22 275.11 277.42 53 WeatherForecast:  2021-11-22 267.45 269.23 80
+        print(weather_data)
+        current_date=weather_data[14:24]
+        current_min_temp=weather_data[25:31]
+        current_max_temp=weather_data[32:38]
+        current_humidity=weather_data[39:41]
+
+        #forecasted data
+        forecast_date=weather_data[60:70]
+        forecast_min_temp=weather_data[71:77]
+        forecast_max_temp=weather_data[78:84]
+        forecast_humidity=weather_data[85:87]
+
+        print('****got data ****')
+        print('****printing after slicing****')
+        print(current_date)
+        print(current_min_temp)
+        print(current_max_temp)
+        print(current_humidity)
+
+        print(forecast_date)
+        print(forecast_min_temp)
+        print(forecast_max_temp)
+        print(forecast_humidity)
+        print('******************************')
+
+        # calculate predicted steps
+
+        pred_steps_today = round(9.36932201  + (65.73209881 * float(current_max_temp)) - (36.397804* float(current_min_temp)) - (10.91733609*float(current_humidity)))
+        
+        pred_steps_tommorrow = round(9.36932201  + (65.73209881 * float(forecast_max_temp)) - (36.397804* float(forecast_min_temp)) - (10.91733609*float(forecast_humidity)))        
+        print('You should have walked {} steps today'.format(pred_steps_today))
+
+        print('Your goal for tommorrow is {} steps'.format(pred_steps_tommorrow))
+
+      
+        # Define data
+        data = [
+        (current_date, current_min_temp, current_max_temp, current_humidity,pred_steps_today)  ]  
+
+        print('**** ready to load csv ****')
+        print(data)
+        
+
+        file_exists = os.path.isfile("/home/pi/weatherdata.csv")
+        # Write CSV file
+        with open("weatherdata.csv", mode='a') as fp:
+            writer = csv.writer(fp, delimiter=",")
+            if not file_exists:
+                writer.writerow(["date","max", "min", "humidity","pred_steps"]) # write header
+            writer.writerows(data)
+
+        print('**** csv created ****')
+ 
+def _process_packet(data):
+    ev = aiobs.HCI_Event()
+    xx = ev.decode(data)
+    xx = EddyStone().decode(ev)
+    broker_address = "192.168.4.17" #enter your broker address here
+    subscribetopic = "testTopic1"
+    publishtopic = "testTopic2"
+    publishmessage = ""
+   
+    if xx:
+        print("Google beacon:{}".format(xx))
+        group = xx.get('url')[8:12]
+        if group == 'grp2':
+          steps =xx.get('url')[24:]
+         
+          print('***beacon received******')
+          print('Step count{}'.format(steps))
+         
+          print('***MQTT call ***********')
+          client = mqtt.Client("P1")
+          client.on_connect=on_connect
+          client.on_message=on_message
+
+          print("*** before comparing actual and predicted steps   ***")
+          # Read csv to dataframe
+   
+          if os.path.isfile("/home/pi/weatherdata.csv") and int(steps) > 0:
+                weatherdata = pd.read_csv ('weatherdata.csv')
+
+                print('** created dataframe ***')
+                print(weatherdata)
+                print(weatherdata.iloc[-1]['pred_steps'])
+          
+                if weatherdata.iloc[-1]['pred_steps'] <= int(steps):
+                   publishmessage = "Goal achieved, keep going!"
+                   #print(weatherdata.iloc[-1]['pred_steps'])
+                else: 
+                   publishmessage = "Work harder"
+                
+                print("*** comparing actual and predicted steps  ***")
+                print(publishmessage)
+                s = serial.Serial(timeout=0.1) 
+                s.baudrate = 115200 
+                s.port = '/dev/ttyACM2'
+                #ttyACM0'  
+                s.open() 
+                while True:
+                    data = publishmessage
+                    if data: 
+                      #print(publishmessage)
+                      s.write(data.encode('utf-8'))
+                      break
+                    else:
+                      print('No data')
+                      break    
+                s.close()
+
+          print('***MQTT call success*****')
+          print('*****Connecting to broker****')
+          client.connect(broker_address)
+          print("******Publish*****")
+          client.publish(publishtopic, publishmessage)
+          client.loop_start()
+          print("******Subscribe****")
+          ##client.subscribe(subscribetopic)
+          time.sleep(10)
+          client.loop_stop()
+
+               
+       
+if __name__=='__main__':
+   
+    mydev = 0
+    event_loop = asyncio.get_event_loop()
+    print(event_loop)
+    mysocket = aiobs.create_bt_socket(mydev)
+    fac = event_loop._create_connection_transport(mysocket,aiobs.BLEScanRequester,None,None)
+    conn, btctrl = event_loop.run_until_complete(fac)
+    btctrl.process = _process_packet
+    print('after steps display')
+    print(btctrl.process)
+    btctrl.send_scan_request()
+    print('after send scan')
+   
+    try:
+       
+        event_loop.run_forever()
+        print("loop forever")
+    except KeyboardInterrupt:
+        print('keyboard interrupt')
+    finally:
+        print('closing event loop')
+        btctrl.stop_scan_request()
+        conn.close()
+        event_loop.close()
